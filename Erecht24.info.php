@@ -7,7 +7,7 @@
 $info = [
     'title' => 'eRecht24 Legal Texts',
     'summary' => 'Integrates with eRecht24 API to synchronize legal texts and create pages automatically',
-    'version' => '1.0.0',
+    'version' => '0.2.0',
     'author' => 'ProcessWire Module',
     'autoload' => true,
     'singular' => true,

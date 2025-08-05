@@ -6,25 +6,6 @@
 
 class ProcessErecht24 extends Process implements Module {
 
-    public static function getModuleInfo() {
-        return [
-            'title' => 'eRecht24 Admin',
-            'summary' => 'Admin interface for managing eRecht24 legal texts',
-            'version' => '1.1.0',
-            'author' => 'ProcessWire Module',
-            'requires' => 'Erecht24',
-            'icon' => 'legal',
-            'page' => [
-                'name' => 'erecht24',
-                'parent' => 'setup',
-                'title' => 'eRecht24 Legal Texts'
-            ],
-            // 'useNavJSON' => true,
-            // 'nav' => [
-            //     ['url' => '', 'label' => 'Dashboard', 'icon' => 'dashboard']
-            // ]
-        ];
-    }
 
     public function init() {
         parent::init();
@@ -45,7 +26,6 @@ class ProcessErecht24 extends Process implements Module {
      * Render the main admin page
      */
     protected function renderPage() {
-        $pages = $this->wire('pages');
         $erecht24 = $this->wire('modules')->get('Erecht24');
         
         $out = '<h2>eRecht24 Legal Texts</h2>';
@@ -60,143 +40,26 @@ class ProcessErecht24 extends Process implements Module {
             return $out;
         }
         
-        // Show configuration info
         $out .= '<div class="uk-grid">';
         $out .= '<div class="uk-width-2-3">';
         
-        // Recent legal text pages
-        $out .= '<h3>Aktuelle Rechtstexte</h3>';
-        $legalPages = $pages->find("template=legal-text, sort=-created, limit=10");
+        // Show status section
+        $out .= $this->renderStatus();
         
-        if($legalPages->count()) {
-            $out .= '<table class="AdminDataTable">';
-            $out .= '<thead><tr><th>Titel</th><th>Typ</th><th>Datum</th><th>Erstellt</th><th>Aktionen</th></tr></thead>';
-            $out .= '<tbody>';
-            
-            foreach($legalPages as $legalPage) {
-                $out .= '<tr>';
-                $out .= '<td><a href="' . $legalPage->editURL . '">' . $legalPage->title . '</a></td>';
-                $out .= '<td>' . ($legalPage->legal_type ?: '-') . '</td>';
-                $out .= '<td>' . ($legalPage->legal_date ? date('d.m.Y', $legalPage->legal_date) : '-') . '</td>';
-                $out .= '<td>' . date('d.m.Y', $legalPage->created) . '</td>';
-                $out .= '<td>';
-                $out .= '<a href="' . $legalPage->url . '" target="_blank" class="ui-button ui-button-small">Ansehen</a> ';
-                $out .= '<a href="' . $legalPage->editURL . '" class="ui-button ui-button-small">Bearbeiten</a>';
-                $out .= '</td>';
-                $out .= '</tr>';
-            }
-            
-            $out .= '</tbody></table>';
-        } else {
-            $out .= '<p>Noch keine Rechtstexte vorhanden.</p>';
-        }
+        // Show recent legal text pages
+        $out .= $this->renderRecentPages();
         
-        // API Client Registration
-        $out .= '<h3>API Client Registration</h3>';
-        $clientId = $erecht24->getModuleSetting('client_id');
-        if(!$clientId) {
-            $out .= '<div class="NoticeWarning">';
-            $out .= '<p>Ihr ProcessWire-System ist noch nicht als API-Client bei eRecht24 registriert.</p>';
-            $out .= '<form method="post" action="./">';
-            $out .= $this->session->CSRF->renderInput();
-            $out .= '<input type="hidden" name="action" value="register_client">';
-            $out .= '<input type="submit" class="ui-button ui-button-primary" value="Bei eRecht24 registrieren">';
-            $out .= '</form>';
-            $out .= '</div>';
-        } else {
-            $out .= '<div class="NoticeMessage">';
-            $out .= '<p>✓ Ihr System ist als API-Client registriert (ID: ' . $clientId . ')</p>';
-            $out .= '</div>';
-        }
-
-        // Configuration section
-        $out .= '<h3>Konfiguration</h3>';
+        // Show registration section if needed
+        $out .= $this->renderRegistrationSection();
         
-        // API Key form
-        $out .= '<form method="post" action="./">';
-        $out .= $this->session->CSRF->renderInput();
-        $out .= '<input type="hidden" name="action" value="save_api_key">';
-        $out .= '<div style="margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 4px;">';
-        $out .= '<p><label for="api_key"><strong>eRecht24 API Key:</strong></label></p>';
-        $out .= '<input type="text" name="api_key" id="api_key" value="' . ($apiKey ?: '') . '" placeholder="Geben Sie Ihren API-Schlüssel ein" style="width: 400px;">';
-        $out .= '<br><br>';
-        $out .= '<input type="submit" class="ui-button ui-button-primary" value="API Key speichern">';
-        $out .= '</div>';
-        $out .= '</form>';
-        
-        // Webhook Secret form
-        $webhookSecret = $erecht24->getModuleSetting('webhook_secret');
-        $out .= '<form method="post" action="./">';
-        $out .= $this->session->CSRF->renderInput();
-        $out .= '<input type="hidden" name="action" value="save_webhook_secret">';
-        $out .= '<div style="margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 4px;">';
-        $out .= '<p><label for="webhook_secret"><strong>Webhook Secret:</strong></label></p>';
-        $out .= '<input type="text" name="webhook_secret" id="webhook_secret" value="' . ($webhookSecret ?: '') . '" placeholder="Webhook Secret" style="width: 400px;">';
-        $out .= '<br><br>';
-        $out .= '<input type="submit" class="ui-button ui-button-primary" value="Webhook Secret speichern">';
-        $out .= ' <input type="submit" name="generate_new" class="ui-button" value="Neues Secret generieren">';
-        $out .= '</div>';
-        $out .= '</form>';
-        $out .= '<br>';
-
-        // Manual sync buttons
-        $out .= '<h3>Manuelle Synchronisation</h3>';
-        $out .= '<p>Sie können die Rechtstexte manuell von eRecht24 abrufen:</p>';
-        
-        $out .= '<form method="post" action="./">';
-        $out .= $this->session->CSRF->renderInput();
-        $out .= '<input type="hidden" name="action" value="sync_legal_text">';
-        $out .= '<select name="sync_type" required>';
-        $out .= '<option value="">Typ auswählen...</option>';
-        $out .= '<option value="imprint">Impressum</option>';
-        $out .= '<option value="privacyPolicy">Datenschutzerklärung</option>';
-        $out .= '<option value="privacyPolicySocialMedia">Datenschutzerklärung Social Media</option>';
-        $out .= '<option value="all">Alle Rechtstexte</option>';
-        $out .= '</select>';
-        $out .= '<input type="submit" class="ui-button ui-button-primary" value="Synchronisieren">';
-        $out .= '</form>';
+        // Show sync form
+        $out .= $this->renderSyncForm();
         
         $out .= '</div>';
         
         // Sidebar with configuration info
-        $out .= '<div class="uk-width-1-3">';
-        $out .= '<h3>Konfiguration</h3>';
+        $out .= $this->renderSidebar();
         
-        $out .= '<div class="uk-panel uk-panel-box">';
-        $out .= '<h4>API-Konfiguration</h4>';
-        $out .= '<p><strong>API Key:</strong> ' . ($apiKey ? '••••••••' : 'Nicht konfiguriert') . '</p>';
-        $webhookSecret = $erecht24->getModuleSetting('webhook_secret');
-        $out .= '<p><strong>Webhook Secret:</strong> ' . ($webhookSecret ? '••••••••' : 'Nicht konfiguriert') . '</p>';
-        $out .= '<p><a href="' . $this->config->urls->admin . 'module/edit?name=Erecht24" class="ui-button">Einstellungen bearbeiten</a></p>';
-        $out .= '</div>';
-        
-        $out .= '<div class="uk-panel uk-panel-box">';
-        $out .= '<h4>Webhook URL</h4>';
-        $webhookUrl = $this->wire('config')->urls->root . 'erecht24-webhook/';
-        $out .= '<p>Verwenden Sie diese URL in Ihren eRecht24 Projekteinstellungen:</p>';
-        $out .= '<code style="word-break: break-all; background: #f5f5f5; padding: 5px; display: block;">' . $webhookUrl . '</code>';
-        $out .= '<p><small>Hinweis: Die URL funktioniert auch wenn keine entsprechende Seite existiert.</small></p>';
-        $out .= '</div>';
-        
-        $out .= '<div class="uk-panel uk-panel-box">';
-        $out .= '<h4>Template-Informationen</h4>';
-        $template = $this->templates->get('legal-text');
-        if($template) {
-            $out .= '<p><strong>Template:</strong> legal-text ✓</p>';
-            $out .= '<p><strong>Benötigte Felder:</strong></p>';
-            $out .= '<ul>';
-            $out .= '<li>legal_content_de (Textarea)</li>';
-            $out .= '<li>legal_content_en (Textarea)</li>';
-            $out .= '<li>legal_type (Text)</li>';
-            $out .= '<li>legal_date (Text/Date)</li>';
-            $out .= '</ul>';
-        } else {
-            $out .= '<p><strong>Template:</strong> legal-text ❌</p>';
-            $out .= '<p class="NoticeWarning">Das Template "legal-text" wurde nicht gefunden. Bitte erstellen Sie es in der Template-Verwaltung.</p>';
-        }
-        $out .= '</div>';
-        
-        $out .= '</div>';
         $out .= '</div>';
         
         return $out;
@@ -223,13 +86,10 @@ class ProcessErecht24 extends Process implements Module {
             return $this->registerClient();
         }
         
-        if($action === 'save_api_key') {
-            return $this->saveApiKey();
+        if($action === 'reset_registration') {
+            return $this->resetRegistration();
         }
         
-        if($action === 'save_webhook_secret') {
-            return $this->saveWebhookSecret();
-        }
         
         return $this->renderPage();
     }
@@ -339,54 +199,229 @@ class ProcessErecht24 extends Process implements Module {
     }
 
     /**
-     * Save API Key to database
+     * Reset API client registration
      */
-    protected function saveApiKey() {
-        $input = $this->wire('input');
+    protected function resetRegistration() {
         $erecht24 = $this->wire('modules')->get('Erecht24');
         
-        $apiKey = trim($input->post('api_key'));
-        
-        if(!$apiKey) {
-            $this->error('Bitte geben Sie einen gültigen API-Schlüssel ein.');
-            return $this->renderPage();
-        }
-        
-        if($erecht24->setModuleSetting('api_key', $apiKey)) {
-            $this->message('API-Schlüssel erfolgreich gespeichert.');
-        } else {
-            $this->error('Fehler beim Speichern des API-Schlüssels.');
+        try {
+            // Clear the client_id setting
+            $erecht24->deleteModuleSetting('client_id');
+            $this->message('API-Client Registrierung wurde erfolgreich zurückgesetzt. Sie können sich nun erneut registrieren.');
+            
+        } catch(\Exception $e) {
+            $this->error('Fehler beim Zurücksetzen der Registrierung: ' . $e->getMessage());
         }
         
         return $this->renderPage();
     }
 
+    
     /**
-     * Save Webhook Secret to database
+     * Render status section
      */
-    protected function saveWebhookSecret() {
-        $input = $this->wire('input');
+    protected function renderStatus() {
         $erecht24 = $this->wire('modules')->get('Erecht24');
+        $apiKey = $erecht24->getModuleSetting('api_key');
+        $webhookSecret = $erecht24->getModuleSetting('webhook_secret');
+        $clientId = $erecht24->getModuleSetting('client_id');
+        $isRegistered = !empty($clientId) && $clientId !== 'Not registered yet';
         
-        // Check if user wants to generate new secret
-        if($input->post('generate_new')) {
-            $webhookSecret = bin2hex(random_bytes(32));
-            $this->message('Neues Webhook Secret generiert.');
-        } else {
-            $webhookSecret = trim($input->post('webhook_secret'));
-            if(!$webhookSecret) {
-                $this->error('Bitte geben Sie ein gültiges Webhook Secret ein.');
-                return $this->renderPage();
+        $out = '<h3>Status</h3>';
+        $out .= '<div class="uk-panel uk-panel-box">';
+        
+        // API Key status
+        $out .= '<p><strong>API Key:</strong> ';
+        $out .= $apiKey ? '<span style="color: green;">✓ Konfiguriert</span>' : '<span style="color: red;">❌ Nicht konfiguriert</span>';
+        $out .= '</p>';
+        
+        // Webhook Secret status
+        $out .= '<p><strong>Webhook Secret:</strong> ';
+        $out .= $webhookSecret ? '<span style="color: green;">✓ Konfiguriert</span>' : '<span style="color: red;">❌ Nicht konfiguriert</span>';
+        $out .= '</p>';
+        
+        // Client registration status
+        $out .= '<p><strong>API Client:</strong> ';
+        $out .= $isRegistered ? '<span style="color: green;">✓ Registriert (' . $clientId . ')</span>' : '<span style="color: orange;">⚠ Nicht registriert</span>';
+        $out .= '</p>';
+        
+        $out .= '</div>';
+        
+        return $out;
+    }
+    
+    /**
+     * Render recent legal text pages
+     */
+    protected function renderRecentPages() {
+        $pages = $this->wire('pages');
+        
+        $out = '<h3>Aktuelle Rechtstexte</h3>';
+        $legalPages = $pages->find("template=legal-text, sort=-created, limit=10, include=unpublished");
+        
+        if($legalPages->count()) {
+            $out .= '<table class="AdminDataTable">';
+            $out .= '<thead><tr><th align="left">Titel</th><th align="left">Datum</th><th align="left">Aktionen</th></tr></thead>';
+            $out .= '<tbody>';
+            
+            foreach($legalPages as $legalPage) {
+                $out .= '<tr>';
+                $out .= '<td><a href="' . $legalPage->editURL . '">' . $legalPage->title . '</a></td>';
+                $out .= '<td>' . ($legalPage->legal_date ? date('d.m.Y H:i:s', $legalPage->legal_date) : '-') . '</td>';
+                $out .= '<td>';
+                $out .= '<a href="' . $legalPage->url . '" target="_blank" class="ui-button ui-button-small">Ansehen</a> ';
+                $out .= '<a href="' . $legalPage->editURL . '" class="ui-button ui-button-small">Bearbeiten</a>';
+                $out .= '</td>';
+                $out .= '</tr>';
             }
-        }
-        
-        if($erecht24->setModuleSetting('webhook_secret', $webhookSecret)) {
-            $this->message('Webhook Secret erfolgreich gespeichert.');
+            
+            $out .= '</tbody></table>';
         } else {
-            $this->error('Fehler beim Speichern des Webhook Secrets.');
+            $out .= '<p>Noch keine Rechtstexte vorhanden.</p>';
         }
         
-        return $this->renderPage();
+        return $out;
+    }
+    
+    /**
+     * Render registration section using InputfieldForm
+     */
+    protected function renderRegistrationSection() {
+        $erecht24 = $this->wire('modules')->get('Erecht24');
+        $clientId = $erecht24->getModuleSetting('client_id');
+        $isRegistered = !empty($clientId) && $clientId !== 'Not registered yet';
+        
+        if($isRegistered) {
+            return ''; // Already registered
+        }
+        
+        $out = '<h3>API Client Registration</h3>';
+        $out .= '<div class="NoticeWarning">';
+        $out .= '<p>Ihr ProcessWire-System ist noch nicht als API-Client bei eRecht24 registriert.</p>';
+        
+        // Create registration form using InputfieldForm
+        $form = $this->modules->get('InputfieldForm');
+        $form->action = './';
+        $form->method = 'post';
+        
+        $field = $this->modules->get('InputfieldHidden');
+        $field->name = 'action';
+        $field->value = 'register_client';
+        $form->add($field);
+        
+        $field = $this->modules->get('InputfieldSubmit');
+        $field->name = 'submit';
+        $field->value = 'Bei eRecht24 registrieren';
+        $field->addClass('ui-button-primary');
+        $form->add($field);
+        
+        $out .= $form->render();
+        $out .= '</div>';
+        
+        return $out;
+    }
+    
+    /**
+     * Render sync form using InputfieldForm
+     */
+    protected function renderSyncForm() {
+        $out = '<h3>Manuelle Synchronisation</h3>';
+        $out .= '<p>Sie können die Rechtstexte manuell von eRecht24 abrufen:</p>';
+        
+        // Create sync form using InputfieldForm
+        $form = $this->modules->get('InputfieldForm');
+        $form->action = './';
+        $form->method = 'post';
+        
+        $field = $this->modules->get('InputfieldHidden');
+        $field->name = 'action';
+        $field->value = 'sync_legal_text';
+        $form->add($field);
+        
+        $field = $this->modules->get('InputfieldSelect');
+        $field->name = 'sync_type';
+        $field->label = 'Typ auswählen';
+        $field->required = true;
+        $field->addOption('', 'Typ auswählen...');
+        $field->addOption('imprint', 'Impressum');
+        $field->addOption('privacyPolicy', 'Datenschutzerklärung');
+        $field->addOption('privacyPolicySocialMedia', 'Datenschutzerklärung Social Media');
+        $field->addOption('all', 'Alle Rechtstexte');
+        $form->add($field);
+        
+        $field = $this->modules->get('InputfieldSubmit');
+        $field->name = 'submit';
+        $field->value = 'Synchronisieren';
+        $field->addClass('ui-button-primary');
+        $form->add($field);
+        
+        $out .= $form->render();
+        
+        return $out;
+    }
+    
+    /**
+     * Render sidebar with configuration info
+     */
+    protected function renderSidebar() {
+        $erecht24 = $this->wire('modules')->get('Erecht24');
+        $apiKey = $erecht24->getModuleSetting('api_key');
+        $webhookSecret = $erecht24->getModuleSetting('webhook_secret');
+        
+        $out = '<div class="uk-width-1-3">';
+        $out .= '<h3>Konfiguration</h3>';
+        
+        $out .= '<div class="uk-panel uk-panel-box">';
+        $out .= '<h4>API-Konfiguration</h4>';
+        $out .= '<p><strong>API Key:</strong> ' . ($apiKey ? '••••••••' : 'Nicht konfiguriert') . '</p>';
+        $out .= '<p><strong>Webhook Secret:</strong> ' . ($webhookSecret ? '••••••••' : 'Nicht konfiguriert') . '</p>';
+        $out .= '<p><a href="' . $this->config->urls->admin . 'module/edit?name=Erecht24" class="ui-button">Einstellungen bearbeiten</a></p>';
+        
+        // Add reset registration button
+        $clientId = $erecht24->getModuleSetting('client_id');
+        $isRegistered = !empty($clientId) && $clientId !== 'Not registered yet';
+        
+        if($isRegistered) {
+            $out .= '<hr style="margin: 15px 0;">';
+            $out .= '<p><strong>Client ID:</strong> ' . $clientId . '</p>';
+            $out .= '<form method="post" action="./" onsubmit="return confirm(\'Sind Sie sicher, dass Sie die API-Client Registrierung zurücksetzen möchten? Sie müssen sich anschließend erneut bei eRecht24 registrieren.\');">';
+            $out .= $this->session->CSRF->renderInput();
+            $out .= '<input type="hidden" name="action" value="reset_registration">';
+            $out .= '<input type="submit" class="ui-button" style="background-color: #dc3545; color: white;" value="⚠ Registrierung zurücksetzen">';
+            $out .= '</form>';
+        }
+        
+        $out .= '</div>';
+        
+        $out .= '<div class="uk-panel uk-panel-box">';
+        $out .= '<h4>Webhook URL</h4>';
+        $webhookUrl = $this->wire('config')->urls->root . 'erecht24-webhook/';
+        $out .= '<p>Verwenden Sie diese URL in Ihren eRecht24 Projekteinstellungen:</p>';
+        $out .= '<code style="word-break: break-all; background: #f5f5f5; padding: 5px; display: block;">' . $webhookUrl . '</code>';
+        $out .= '<p><small>Hinweis: Die URL funktioniert auch wenn keine entsprechende Seite existiert.</small></p>';
+        $out .= '</div>';
+        
+        $out .= '<div class="uk-panel uk-panel-box">';
+        $out .= '<h4>Template-Informationen</h4>';
+        $template = $this->templates->get('legal-text');
+        if($template) {
+            $out .= '<p><strong>Template:</strong> legal-text ✓</p>';
+            $out .= '<p><strong>Benötigte Felder:</strong></p>';
+            $out .= '<ul>';
+            $out .= '<li>legal_content_de (Textarea)</li>';
+            $out .= '<li>legal_content_en (Textarea)</li>';
+            $out .= '<li>legal_type (Text)</li>';
+            $out .= '<li>legal_date (Text/Date)</li>';
+            $out .= '</ul>';
+        } else {
+            $out .= '<p><strong>Template:</strong> legal-text ❌</p>';
+            $out .= '<p class="NoticeWarning">Das Template "legal-text" wurde nicht gefunden. Bitte erstellen Sie es in der Template-Verwaltung.</p>';
+        }
+        $out .= '</div>';
+        
+        $out .= '</div>';
+        
+        return $out;
     }
 
 }

@@ -6,7 +6,7 @@
  * Integrates with eRecht24 API to synchronize legal texts (imprint, privacy policy)
  * and automatically creates pages with legal content.
  * 
- * @version 1.0.0
+ * @version 0.2.0
  * @author ProcessWire Module
  * 
  */
@@ -29,56 +29,44 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
         'all'
     ];
 
-    public static function getModuleInfo() {
-        return [
-            'title' => 'eRecht24 Legal Texts',
-            'summary' => 'Integrates with eRecht24 API to synchronize legal texts and create pages automatically',
-            'version' => '1.2.0',
-            'author' => 'ProcessWire Module',
-            'autoload' => true,
-            'singular' => true,
-            'requires' => 'ProcessWire>=3.0.0',
-            'icon' => 'legal'
-        ];
-    }
 
 
     /**
-     * Get a module setting from custom database table
+     * Check if client is properly registered with eRecht24
+     *
+     * @return bool True if client has valid registration
+     */
+    protected function isClientRegistered() {
+        $clientId = $this->getModuleSetting('client_id');
+        return !empty($clientId) && $clientId !== 'Not registered yet';
+    }
+
+    /**
+     * Get a module setting with config.php override support
      */
     protected function getModuleSetting($key) {
-        $database = $this->wire('database');
+        $config = $this->wire('config');
         
-        try {
-            $query = $database->prepare('SELECT setting_value FROM erecht24_config WHERE setting_name = ?');
-            $query->execute([$key]);
-            $result = $query->fetch(\PDO::FETCH_ASSOC);
-            
-            return $result ? $result['setting_value'] : null;
-            
-        } catch(\Exception $e) {
-            $this->log("Error retrieving module setting '$key': " . $e->getMessage());
-            return null;
+        // Check for config.php override first
+        $configKey = 'erecht24_' . $key;
+        if(isset($config->$configKey)) {
+            return $config->$configKey;
         }
+        
+        // Fall back to module configuration
+        $moduleConfig = $this->wire('modules')->getConfig($this);
+        return isset($moduleConfig[$key]) ? $moduleConfig[$key] : null;
     }
 
     /**
-     * Set a module setting in custom database table
+     * Set a module setting in ProcessWire module config
      */
     protected function setModuleSetting($key, $value) {
-        $database = $this->wire('database');
-        
         try {
-            // Use INSERT ... ON DUPLICATE KEY UPDATE for MySQL
-            $query = $database->prepare(
-                'INSERT INTO erecht24_config (setting_name, setting_value) 
-                 VALUES (?, ?) 
-                 ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), modified = CURRENT_TIMESTAMP'
-            );
-            $query->execute([$key, $value]);
-            
+            $moduleConfig = $this->wire('modules')->getConfig($this);
+            $moduleConfig[$key] = $value;
+            $this->wire('modules')->saveConfig($this, $moduleConfig);
             return true;
-            
         } catch(\Exception $e) {
             $this->log("Error setting module setting '$key': " . $e->getMessage());
             return false;
@@ -89,35 +77,18 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
      * Get all module settings as array
      */
     protected function getAllModuleSettings() {
-        $database = $this->wire('database');
-        $settings = [];
-        
-        try {
-            $query = $database->prepare('SELECT setting_name, setting_value FROM erecht24_config');
-            $query->execute();
-            
-            while($row = $query->fetch(\PDO::FETCH_ASSOC)) {
-                $settings[$row['setting_name']] = $row['setting_value'];
-            }
-            
-        } catch(\Exception $e) {
-            $this->log("Error retrieving all module settings: " . $e->getMessage());
-        }
-        
-        return $settings;
+        return $this->wire('modules')->getConfig($this);
     }
 
     /**
-     * Delete a module setting from custom database table
+     * Delete a module setting
      */
     protected function deleteModuleSetting($key) {
-        $database = $this->wire('database');
-        
         try {
-            $query = $database->prepare('DELETE FROM erecht24_config WHERE setting_name = ?');
-            $query->execute([$key]);
+            $moduleConfig = $this->wire('modules')->getConfig($this);
+            unset($moduleConfig[$key]);
+            $this->wire('modules')->saveConfig($this, $moduleConfig);
             return true;
-            
         } catch(\Exception $e) {
             $this->log("Error deleting module setting '$key': " . $e->getMessage());
             return false;
@@ -126,24 +97,25 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
 
 
     /**
-     * Check if this is a webhook request and handle it
+     * Handle webhook requests via URL hook
      */
-    public function checkWebhookRequest(HookEvent $event) {
+    public function handleWebhook(HookEvent $event) {
         $input = $this->wire('input');
         
-        // Check if this is a webhook request based on URL and parameters
-        $requestUri = $_SERVER['REQUEST_URI'] ?? '';
+        if(!$input->get('erecht24_type')) {
+            http_response_code(400);
+            header('Content-Type: application/json');
+            echo json_encode(['error' => 'Missing erecht24_type parameter']);
+            return;
+        }
         
-        if(strpos($requestUri, '/erecht24-webhook') !== false && $input->get('erecht24_type')) {
-            try {
-                $this->processWebhook();
-            } catch(\Exception $e) {
-                $this->log("eRecht24 webhook error: " . $e->getMessage());
-                http_response_code(500);
-                header('Content-Type: application/json');
-                echo json_encode(['error' => 'Internal server error']);
-            }
-            exit; // Stop further processing
+        try {
+            $this->processWebhook();
+        } catch(\Exception $e) {
+            $this->log("eRecht24 webhook error: " . $e->getMessage());
+            http_response_code(500);
+            header('Content-Type: application/json');
+            echo json_encode(['error' => 'Internal server error']);
         }
     }
 
@@ -205,13 +177,14 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
     }
 
     /**
-     * Validate webhook request
+     * Validate webhook request with timestamp check
      */
     protected function validateWebhookRequest() {
         $input = $this->wire('input');
         
         $secret = $input->get('erecht24_secret');
         $type = $input->get('erecht24_type');
+        $timestamp = $input->get('erecht24_timestamp');
         
         if(!$secret || !$type) {
             return false;
@@ -224,6 +197,17 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
         $webhookSecret = $this->getModuleSetting('webhook_secret');
         if(!$webhookSecret || $webhookSecret !== $secret) {
             return false;
+        }
+        
+        // Optional timestamp validation (prevent replay attacks)
+        if($timestamp) {
+            $currentTime = time();
+            $requestTime = (int)$timestamp;
+            // Allow requests within 5 minutes
+            if(abs($currentTime - $requestTime) > 300) {
+                $this->log("eRecht24 webhook timestamp validation failed: too old");
+                return false;
+            }
         }
         
         return true;
@@ -239,6 +223,9 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
 
     /**
      * Handle legal text update
+     *
+     * @param string $type Legal text type (imprint, privacyPolicy, privacyPolicySocialMedia)
+     * @throws WireException If API key is not configured
      */
     public function handleLegalTextUpdate($type) {
         $apiKey = $this->getModuleSetting('api_key');
@@ -257,6 +244,10 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
 
     /**
      * Fetch legal text from eRecht24 API
+     *
+     * @param string $type Legal text type
+     * @param string $apiKey eRecht24 API key
+     * @return array|null Legal text data or null on error
      */
     protected function fetchLegalText($type, $apiKey) {
         $http = new WireHttp();
@@ -303,6 +294,11 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
 
     /**
      * Create a new page with legal text content
+     *
+     * @param string $type Legal text type
+     * @param array $legalText Legal text data from API
+     * @return Page Created or updated page
+     * @throws WireException If legal-text template is not found
      */
     protected function createLegalTextPage($type, $legalText) {
         $pages = $this->wire('pages');
@@ -314,14 +310,20 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
             throw new WireException('Template "legal-text" not found. Please create it first.');
         }
         
+        // Get configured parent page
+        $parentPageId = $this->getModuleSetting('parent_page') ?: 1;
+        $parentPage = $pages->get($parentPageId);
+        if(!$parentPage->id) {
+            $parentPage = $pages->get('/');
+        }
+        
         // Create page name with date and type
-        $date = date('Y-m-d');
+        $date = date('Y-m-d H:i:s');
         $typeName = self::LEGAL_TEXT_TYPES[$type] ?? $type;
         $pageName = $date . '-' . $this->sanitizer->pageName($typeName);
         
         // Check if page already exists today
-        $homePage = $pages->get('/');
-        $existingPage = $homePage->child("name=$pageName");
+        $existingPage = $parentPage->child("name=$pageName");
         
         if($existingPage->id) {
             // Update existing page
@@ -330,8 +332,9 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
             // Create new page
             $page = new Page();
             $page->template = $template;
-            $page->parent = $homePage;
+            $page->parent = $parentPage;
             $page->name = $pageName;
+            $page->status(Page::statusUnpublished);
         }
         
         // Set page title
@@ -368,59 +371,82 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
     public static function getModuleConfigInputfields(array $data) {
         $inputfields = new InputfieldWrapper();
         $modules = wire('modules');
-        $erecht24 = wire('modules')->get('Erecht24');
-        
+        $config = wire('config');
         
         // Configuration note
         $field = $modules->get('InputfieldMarkup');
         $field->name = 'config_note';
         $field->label = 'Configuration Storage';
-        $field->description = 'All eRecht24 configuration is stored in a custom database table for security and production compatibility.';
+        $field->description = 'Configuration can be set here or overridden in site/config.php';
         $field->value = '<div style="background: #e8f4fd; border: 1px solid #bee5eb; padding: 15px; margin: 10px 0; border-radius: 4px;">';
-        $field->value .= '<strong>📝 Note:</strong> Configuration values are stored in a dedicated database table (erecht24_config). ';
-        $field->value .= 'Edit the values below and click "Submit" to save them to the database.';
+        $field->value .= '<strong>📝 Note:</strong> You can override these settings in site/config.php using: <code>$config->erecht24_api_key</code>, <code>$config->erecht24_webhook_secret</code>, etc.';
         $field->value .= '</div>';
         $inputfields->add($field);
         
-        // API Key field (editable)
+        // API Key field
         $field = $modules->get('InputfieldText');
         $field->name = 'api_key';
         $field->label = 'eRecht24 API Key';
         $field->description = 'Enter your eRecht24 API key';
         $field->columnWidth = 100;
         $field->required = false;
-        $apiKey = $erecht24->getModuleSetting('api_key');
-        $field->value = $apiKey ?: '';
+        
+        // Check for config.php override
+        if(isset($config->erecht24_api_key)) {
+            $field->value = $config->erecht24_api_key;
+            $field->attr('readonly', true);
+            $field->description .= ' (Read-only: Set in site/config.php)';
+        } else {
+            $field->value = isset($data['api_key']) ? $data['api_key'] : '';
+        }
         $inputfields->add($field);
         
-        // Webhook Secret field (editable with generate button)
+        // Webhook Secret field
         $field = $modules->get('InputfieldText');
         $field->name = 'webhook_secret';
         $field->label = 'Webhook Secret';
-        $field->description = 'Enter webhook secret or leave empty to auto-generate';
+        $field->description = 'Webhook secret for API communication';
         $field->columnWidth = 50;
         $field->required = false;
-        $webhookSecret = $erecht24->getModuleSetting('webhook_secret');
-        $field->value = $webhookSecret ?: '';
+        
+        if(isset($config->erecht24_webhook_secret)) {
+            $field->value = $config->erecht24_webhook_secret;
+            $field->attr('readonly', true);
+            $field->description .= ' (Read-only: Set in site/config.php)';
+        } else {
+            $field->value = isset($data['webhook_secret']) ? $data['webhook_secret'] : '';
+        }
         $inputfields->add($field);
         
-        // Generate webhook secret button
-        $field = $modules->get('InputfieldMarkup');
-        $field->name = 'generate_webhook';
-        $field->label = 'Generate New Webhook Secret';
-        $field->columnWidth = 50;
-        $field->value = '<button type="button" onclick="document.querySelector(\'input[name=webhook_secret]\').value=\'' . bin2hex(random_bytes(32)) . '\'" class="ui-button">Generate New Secret</button>';
+        // Generate webhook secret button (only if not in config.php)
+        if(!isset($config->erecht24_webhook_secret)) {
+            $field = $modules->get('InputfieldMarkup');
+            $field->name = 'generate_webhook';
+            $field->label = 'Generate New Webhook Secret';
+            $field->columnWidth = 50;
+            $field->value = '<button type="button" onclick="document.querySelector(\'input[name=webhook_secret]\').value=\'' . bin2hex(random_bytes(32)) . '\'" class="ui-button">Generate New Secret</button>';
+            $inputfields->add($field);
+        }
+        
+        // Parent Page field
+        $field = $modules->get('InputfieldPageListSelect');
+        $field->name = 'parent_page';
+        $field->label = 'Parent Page for Legal Texts';
+        $field->description = 'Select the parent page where legal text pages will be created';
+        $field->value = isset($data['parent_page']) ? $data['parent_page'] : 1; // Default to home page
+        $field->parent_id = 0;
+        $field->columnWidth = 100;
         $inputfields->add($field);
         
         // Client ID field (read-only)
         $field = $modules->get('InputfieldText');
-        $field->name = 'client_id_display';
+        $field->name = 'client_id';
         $field->label = 'Client ID (Auto-populated)';
         $field->description = 'Client ID will be automatically set when registering with eRecht24 API';
         $field->attr('readonly', true);
         $field->columnWidth = 100;
-        $clientId = $erecht24->getModuleSetting('client_id');
-        $field->value = $clientId ? $clientId : 'Not registered yet';
+        $clientId = isset($data['client_id']) ? $data['client_id'] : null;
+        $field->value = (!empty($clientId) && $clientId !== 'Not registered yet') ? $clientId : 'Not registered yet';
         $inputfields->add($field);
         
         // Webhook URL info
@@ -432,18 +458,18 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
         $field->value = "<code style='background: #f5f5f5; padding: 5px; display: block; margin: 5px 0;'>{$webhookUrl}</code>";
         $inputfields->add($field);
         
-        // Registration status and button
+        // Registration status
         $field = $modules->get('InputfieldMarkup');
         $field->name = 'registration_info';
         $field->label = 'API Client Registration';
-        $clientId = $erecht24->getModuleSetting('client_id');
+        $clientId = isset($data['client_id']) ? $data['client_id'] : null;
+        $isRegistered = !empty($clientId) && $clientId !== 'Not registered yet';
         
-        if(!$clientId) {
+        if(!$isRegistered) {
             $field->description = 'Your ProcessWire installation needs to be registered as an API client with eRecht24.';
             $field->value = '<div style="background: #fff3cd; border: 1px solid #ffeaa7; padding: 10px; margin: 10px 0;">';
-            $field->value .= '<strong>Registration Required:</strong> Please register your installation with eRecht24.<br>';
-            $field->value .= 'Go to <strong>Setup > eRecht24 Legal Texts</strong> and click "Bei eRecht24 registrieren".<br>';
-            $field->value .= '<small>If the admin page is not available, refresh modules or install "eRecht24 Admin" manually.</small>';
+            $field->value .= '⚠ <strong>Registration Required:</strong> Please register your installation with eRecht24.<br>';
+            $field->value .= 'Go to <strong>Setup > eRecht24 Legal Texts</strong> and click "Bei eRecht24 registrieren".';
             $field->value .= '</div>';
         } else {
             $field->value = '<div style="background: #d4edda; border: 1px solid #c3e6cb; padding: 10px; margin: 10px 0;">';
@@ -458,54 +484,11 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
 
 
     /**
-     * Hook into ProcessWire's module config save process
+     * Initialize the module
      */
     public function init() {
-        // Handle webhook requests early in the process
-        $this->addHookBefore('ProcessWire::ready', $this, 'checkWebhookRequest');
-        
-        // Hook into module config save process
-        $this->addHookAfter('Modules::saveConfig', $this, 'hookModuleConfigSave');
-    }
-    
-    /**
-     * Hook method to intercept module config saves for this module
-     */
-    public function hookModuleConfigSave(HookEvent $event) {
-        $className = $event->arguments(0);
-        $configData = $event->arguments(1);
-        
-        // Only handle saves for this module
-        if(is_string($className)) {
-            $moduleClass = $className;
-        } else if(is_object($className)) {
-            $moduleClass = $className->className();
-        } else {
-            return;
-        }
-        
-        if($moduleClass !== 'Erecht24') {
-            return;
-        }
-        
-        // Save to our database instead
-        if(isset($configData['api_key'])) {
-            $this->setModuleSetting('api_key', $configData['api_key']);
-        }
-        
-        if(isset($configData['webhook_secret'])) {
-            if($configData['webhook_secret']) {
-                $this->setModuleSetting('webhook_secret', $configData['webhook_secret']);
-            } else {
-                // Auto-generate if empty
-                $webhookSecret = bin2hex(random_bytes(32));
-                $this->setModuleSetting('webhook_secret', $webhookSecret);
-            }
-        }
-        
-        // Prevent ProcessWire from saving to its own config system
-        $event->replace = true;
-        $event->return = true;
+        // Handle webhook requests with dedicated URL hook
+        $this->addHook('/erecht24-webhook', $this, 'handleWebhook');
     }
 
 
@@ -513,8 +496,8 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
      * Install method
      */
     public function ___install() {
-        // Create database table for configuration storage
-        $this->createConfigTable();
+        // Migrate existing config table data if it exists
+        $this->migrateOldConfig();
         
         // Install the ProcessErecht24 module for admin interface
         $modules = $this->wire('modules');
@@ -524,46 +507,47 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
             $this->message('ProcessErecht24 admin interface installed.');
         }
         
-        // Auto-generate webhook secret on install
-        $this->autoGenerateWebhookSecret();
-        
-        $this->message('eRecht24 module installed successfully. Please configure your API key and visit Setup > eRecht24 Legal Texts.');
-    }
-
-    /**
-     * Create the configuration database table
-     */
-    protected function createConfigTable() {
-        $database = $this->wire('database');
-        
-        $sql = "CREATE TABLE IF NOT EXISTS erecht24_config (
-            id int(10) unsigned NOT NULL AUTO_INCREMENT,
-            setting_name varchar(255) NOT NULL,
-            setting_value text,
-            created timestamp DEFAULT CURRENT_TIMESTAMP,
-            modified timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            PRIMARY KEY (id),
-            UNIQUE KEY setting_name (setting_name)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
-        
-        try {
-            $database->exec($sql);
-            $this->message('eRecht24 configuration table created successfully.');
-        } catch(\Exception $e) {
-            throw new WireException('Failed to create eRecht24 configuration table: ' . $e->getMessage());
-        }
-    }
-
-    /**
-     * Auto-generate webhook secret if not exists
-     */
-    protected function autoGenerateWebhookSecret() {
+        // Auto-generate webhook secret if not already set
         if(!$this->getModuleSetting('webhook_secret')) {
-            $webhookSecret = bin2hex(random_bytes(32));
-            $this->setModuleSetting('webhook_secret', $webhookSecret);
+            $this->setModuleSetting('webhook_secret', bin2hex(random_bytes(32)));
             $this->message('Webhook secret auto-generated.');
         }
+        
+        $this->message('eRecht24 module installed successfully. Please configure your API key.');
     }
+
+    /**
+     * Migrate configuration from old database table to module config
+     */
+    protected function migrateOldConfig() {
+        $database = $this->wire('database');
+        
+        try {
+            // Check if old config table exists
+            $result = $database->query("SHOW TABLES LIKE 'erecht24_config'");
+            if(!$result->rowCount()) {
+                return; // No old table to migrate
+            }
+            
+            // Migrate existing settings
+            $query = $database->prepare('SELECT setting_name, setting_value FROM erecht24_config');
+            $query->execute();
+            
+            $moduleConfig = [];
+            while($row = $query->fetch(\PDO::FETCH_ASSOC)) {
+                $moduleConfig[$row['setting_name']] = $row['setting_value'];
+            }
+            
+            if(!empty($moduleConfig)) {
+                $this->wire('modules')->saveConfig($this, $moduleConfig);
+                $this->message('Migrated configuration from old database table.');
+            }
+            
+        } catch(\Exception $e) {
+            $this->log("Error migrating old config: " . $e->getMessage());
+        }
+    }
+
 
     /**
      * Uninstall method
@@ -576,13 +560,13 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
             $modules->uninstall('ProcessErecht24');
         }
         
-        // Remove configuration table
+        // Remove old configuration table if it exists
         $database = $this->wire('database');
         try {
             $database->exec('DROP TABLE IF EXISTS erecht24_config');
             $this->message('eRecht24 configuration table removed.');
         } catch(\Exception $e) {
-            $this->error('Error removing eRecht24 configuration table: ' . $e->getMessage());
+            // Table might not exist, that's OK
         }
     }
 }
