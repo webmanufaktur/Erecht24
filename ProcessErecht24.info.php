@@ -7,7 +7,7 @@
 $info = [
     'title' => 'eRecht24 Admin',
     'summary' => 'Admin interface for managing eRecht24 legal texts',
-    'version' => '0.2.0',
+    'version' => '0.2.1',
     'author' => 'ProcessWire Module',
     'requires' => 'Erecht24',
     'icon' => 'legal',

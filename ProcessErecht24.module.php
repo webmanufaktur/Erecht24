@@ -6,6 +6,13 @@
 
 class ProcessErecht24 extends Process implements Module {
 
+    /** @var string|null */
+    protected $previewType = null;
+    /** @var string|null */
+    protected $previewHtml = null;
+    /** @var string|null */
+    protected $testPingMessage = null;
+
 
     public function init() {
         parent::init();
@@ -54,6 +61,12 @@ class ProcessErecht24 extends Process implements Module {
         
         // Show sync form
         $out .= $this->renderSyncForm();
+
+        // Show dry-run preview form
+        $out .= $this->renderPreviewForm();
+
+        // Show test webhook (ping) action
+        $out .= $this->renderTestPingForm();
         
         $out .= '</div>';
         
@@ -61,6 +74,23 @@ class ProcessErecht24 extends Process implements Module {
         $out .= $this->renderSidebar();
         
         $out .= '</div>';
+
+        // If there are results to show (test ping or preview), render them below
+        if($this->testPingMessage) {
+            $out .= '<div class="uk-panel uk-panel-box" style="margin-top:15px">';
+            $out .= '<h4>Webhook Ping Ergebnis</h4>';
+            $out .= '<pre style="white-space:pre-wrap">' . $this->sanitizer->entities($this->testPingMessage) . '</pre>';
+            $out .= '</div>';
+        }
+
+        if($this->previewHtml) {
+            $out .= '<div class="uk-panel uk-panel-box" style="margin-top:15px">';
+            $out .= '<h4>Dry-Run Vorschau: ' . $this->sanitizer->entities($this->previewType) . '</h4>';
+            // Basic defense: remove script tags while allowing HTML formatting
+            $safeHtml = preg_replace('#<script(.*?)>(.*?)</script>#is', '', $this->previewHtml);
+            $out .= '<div class="pw-content" style="max-height:500px; overflow:auto; border:1px solid #eee; padding:10px">' . $safeHtml . '</div>';
+            $out .= '</div>';
+        }
         
         return $out;
     }
@@ -88,6 +118,16 @@ class ProcessErecht24 extends Process implements Module {
         
         if($action === 'reset_registration') {
             return $this->resetRegistration();
+        }
+
+        if($action === 'test_ping') {
+            $this->performTestPing();
+            return $this->renderPage();
+        }
+
+        if($action === 'preview_legal_text') {
+            $this->performDryRunPreview();
+            return $this->renderPage();
         }
         
         
@@ -226,6 +266,8 @@ class ProcessErecht24 extends Process implements Module {
         $webhookSecret = $erecht24->getModuleSetting('webhook_secret');
         $clientId = $erecht24->getModuleSetting('client_id');
         $isRegistered = !empty($clientId) && $clientId !== 'Not registered yet';
+        $lastWebhookStatus = $erecht24->getModuleSetting('last_webhook_status');
+        $lastWebhookTime = (int) ($erecht24->getModuleSetting('last_webhook_time') ?: 0);
         
         $out = '<h3>Status</h3>';
         $out .= '<div class="uk-panel uk-panel-box">';
@@ -244,6 +286,28 @@ class ProcessErecht24 extends Process implements Module {
         $out .= '<p><strong>API Client:</strong> ';
         $out .= $isRegistered ? '<span style="color: green;">✓ Registriert (' . $clientId . ')</span>' : '<span style="color: orange;">⚠ Nicht registriert</span>';
         $out .= '</p>';
+
+        // Last webhook status/time
+        if($lastWebhookTime) {
+            $statusColor = ($lastWebhookStatus === 'success') ? 'green' : 'red';
+            $statusLabel = $lastWebhookStatus ? $lastWebhookStatus : 'unbekannt';
+            $out .= '<p><strong>Letzter Webhook:</strong> ';
+            $out .= '<span style="color:' . $statusColor . '">' . $this->sanitizer->entities($statusLabel) . '</span>';
+            $out .= ' (' . date('d.m.Y H:i:s', $lastWebhookTime) . ')';
+            $out .= '</p>';
+        }
+
+        // Last sync times per type
+        $types = ['imprint' => 'Impressum', 'privacyPolicy' => 'Datenschutzerklärung', 'privacyPolicySocialMedia' => 'Datenschutzerklärung Social Media'];
+        $out .= '<div style="margin-top:10px">';
+        $out .= '<strong>Letzte Synchronisation:</strong>';
+        $out .= '<ul style="margin:5px 0 0 18px">';
+        foreach($types as $key => $label) {
+            $ts = (int) ($erecht24->getModuleSetting('last_sync_' . $key) ?: 0);
+            $out .= '<li>' . $this->sanitizer->entities($label) . ': ' . ($ts ? date('d.m.Y H:i:s', $ts) : '-') . '</li>';
+        }
+        $out .= '</ul>';
+        $out .= '</div>';
         
         $out .= '</div>';
         
@@ -303,7 +367,12 @@ class ProcessErecht24 extends Process implements Module {
         $form = $this->modules->get('InputfieldForm');
         $form->action = './';
         $form->method = 'post';
-        
+
+        // CSRF token
+        $tokenField = $this->modules->get('InputfieldMarkup');
+        $tokenField->value = $this->session->CSRF->renderInput();
+        $form->add($tokenField);
+
         $field = $this->modules->get('InputfieldHidden');
         $field->name = 'action';
         $field->value = 'register_client';
@@ -332,7 +401,12 @@ class ProcessErecht24 extends Process implements Module {
         $form = $this->modules->get('InputfieldForm');
         $form->action = './';
         $form->method = 'post';
-        
+
+        // CSRF token
+        $tokenField = $this->modules->get('InputfieldMarkup');
+        $tokenField->value = $this->session->CSRF->renderInput();
+        $form->add($tokenField);
+
         $field = $this->modules->get('InputfieldHidden');
         $field->name = 'action';
         $field->value = 'sync_legal_text';
@@ -358,6 +432,130 @@ class ProcessErecht24 extends Process implements Module {
         $out .= $form->render();
         
         return $out;
+    }
+
+    /**
+     * Render dry-run preview form
+     */
+    protected function renderPreviewForm() {
+        $out = '<h3>Vorschau (Dry-Run)</h3>';
+        $out .= '<p>Zeigt den Rechtstext aus der API an, ohne Änderungen zu speichern.</p>';
+        
+        /** @var \ProcessWire\InputfieldForm $form */
+        $form = $this->modules->get('InputfieldForm');
+        $form->action = './';
+        $form->method = 'post';
+
+        /** @var \ProcessWire\InputfieldHidden $field */
+        $field = $this->modules->get('InputfieldHidden');
+        $field->name = 'action';
+        $field->value = 'preview_legal_text';
+        $form->add($field);
+
+        /** @var \ProcessWire\InputfieldSelect $field */
+        $field = $this->modules->get('InputfieldSelect');
+        $field->name = 'preview_type';
+        $field->label = 'Typ auswählen';
+        $field->required = true;
+        $field->addOption('', 'Typ auswählen...');
+        $field->addOption('imprint', 'Impressum');
+        $field->addOption('privacyPolicy', 'Datenschutzerklärung');
+        $field->addOption('privacyPolicySocialMedia', 'Datenschutzerklärung Social Media');
+        $form->add($field);
+
+        /** @var \ProcessWire\InputfieldSubmit $field */
+        $field = $this->modules->get('InputfieldSubmit');
+        $field->name = 'submit';
+        $field->value = 'Vorschau anzeigen';
+        $form->add($field);
+
+        return $out . $form->render();
+    }
+
+    /**
+     * Render test webhook (ping) form
+     */
+    protected function renderTestPingForm() {
+        $out = '<h3>Webhook testen</h3>';
+        $out .= '<p>Sendet einen Ping an den Webhook-Endpunkt.</p>';
+
+        /** @var \ProcessWire\InputfieldForm $form */
+        $form = $this->modules->get('InputfieldForm');
+        $form->action = './';
+        $form->method = 'post';
+
+        /** @var \ProcessWire\InputfieldHidden $field */
+        $field = $this->modules->get('InputfieldHidden');
+        $field->name = 'action';
+        $field->value = 'test_ping';
+        $form->add($field);
+
+        /** @var \ProcessWire\InputfieldSubmit $field */
+        $field = $this->modules->get('InputfieldSubmit');
+        $field->name = 'submit';
+        $field->value = 'Webhook Ping ausführen';
+        $form->add($field);
+
+        return $out . $form->render();
+    }
+
+    /**
+     * Perform test ping by calling the public webhook URL with type=ping
+     */
+    protected function performTestPing() {
+        $erecht24 = $this->wire('modules')->get('Erecht24');
+        $secret = $erecht24->getModuleSetting('webhook_secret');
+        if(!$secret) {
+            $this->error('Webhook Secret ist nicht konfiguriert.');
+            return;
+        }
+        $cfg = $this->wire('config');
+        $base = ($cfg->https ? 'https://' : 'http://') . $cfg->httpHost . $cfg->urls->root;
+        $url = $base . 'erecht24-webhook/?erecht24_type=ping&erecht24_secret=' . urlencode($secret);
+        $http = new \ProcessWire\WireHttp();
+        $http->setTimeout(5);
+        $response = $http->get($url);
+        // ProcessWire WireHttp exposes getHttpCode() for status
+        $code = method_exists($http, 'getHttpCode') ? (int) $http->getHttpCode() : 0;
+        $body = is_string($response) ? $response : '';
+        if(!$code && !$body) {
+            // Provide error context if available
+            $err = method_exists($http, 'getError') ? $http->getError() : null;
+            $this->testPingMessage = 'HTTP 0\n' . ($err ? print_r($err, true) : 'No response');
+            $this->error('Webhook Ping fehlgeschlagen.');
+            return;
+        }
+        $this->testPingMessage = 'HTTP ' . $code . "\n" . $body;
+        if($code === 200) $this->message('Webhook Ping erfolgreich.'); else $this->error('Webhook Ping fehlgeschlagen.');
+    }
+
+    /**
+     * Perform dry-run preview by fetching content via module helper
+     */
+    protected function performDryRunPreview() {
+        $input = $this->wire('input');
+        $type = $input->post('preview_type');
+        if(!$type) {
+            $this->error('Bitte wählen Sie einen Typ für die Vorschau.');
+            return;
+        }
+        $erecht24 = $this->wire('modules')->get('Erecht24');
+        try {
+            $data = $erecht24->getLegalTextPreview($type);
+            if(!$data) {
+                $this->error('Keine Daten für die Vorschau erhalten.');
+                return;
+            }
+            $this->previewType = $type;
+            $this->previewHtml = isset($data['html_de']) ? (string) $data['html_de'] : '';
+            if(!$this->previewHtml) {
+                $this->error('Die API-Antwort enthielt keinen HTML-Inhalt.');
+            } else {
+                $this->message('Vorschau erfolgreich geladen.');
+            }
+        } catch(\Exception $e) {
+            $this->error('Fehler bei der Vorschau: ' . $e->getMessage());
+        }
     }
     
     /**

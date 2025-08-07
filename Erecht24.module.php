@@ -6,7 +6,7 @@
  * Integrates with eRecht24 API to synchronize legal texts (imprint, privacy policy)
  * and automatically creates pages with legal content.
  * 
- * @version 0.2.0
+ * @version 0.2.1
  * @author ProcessWire Module
  * 
  */
@@ -29,7 +29,8 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
         'all'
     ];
 
-
+    const DEFAULT_HTTP_TIMEOUT = 30;
+    const DEFAULT_HTTP_RETRIES = 3;
 
     /**
      * Check if client is properly registered with eRecht24
@@ -101,11 +102,17 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
      */
     public function handleWebhook(HookEvent $event) {
         $input = $this->wire('input');
+        $method = $this->getRequestMethod();
+        $type = (string) $input->get('erecht24_type');
         
-        if(!$input->get('erecht24_type')) {
-            http_response_code(400);
-            header('Content-Type: application/json');
-            echo json_encode(['error' => 'Missing erecht24_type parameter']);
+        if(!$type) {
+            $this->sendJson(400, ['error' => 'Missing erecht24_type parameter']);
+            return;
+        }
+        
+        // Enforce methods: only GET for ping, POST for all others
+        if(($type === 'ping' && $method !== 'GET') || ($type !== 'ping' && $method !== 'POST')) {
+            $this->sendJson(405, ['error' => 'Method Not Allowed']);
             return;
         }
         
@@ -113,9 +120,7 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
             $this->processWebhook();
         } catch(\Exception $e) {
             $this->log("eRecht24 webhook error: " . $e->getMessage());
-            http_response_code(500);
-            header('Content-Type: application/json');
-            echo json_encode(['error' => 'Internal server error']);
+            $this->sendJson(500, ['error' => 'Internal server error']);
         }
     }
 
@@ -130,9 +135,7 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
         // Validate request
         if(!$this->validateWebhookRequest()) {
             $this->log("eRecht24 webhook validation failed");
-            http_response_code(401);
-            header('Content-Type: application/json');
-            echo json_encode(['error' => 'Unauthorized']);
+            $this->sendJson(401, ['error' => 'Unauthorized']);
             return;
         }
 
@@ -159,20 +162,21 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
                     $this->handleLegalTextUpdate('privacyPolicySocialMedia');
                     break;
                 default:
-                    http_response_code(400);
-                    header('Content-Type: application/json');
-                    echo json_encode(['error' => 'Invalid type']);
+                    $this->sendJson(400, ['error' => 'Invalid type']);
                     return;
             }
             
-            header('Content-Type: application/json');
-            echo json_encode(['status' => 200, 'message' => 'Success']);
+            // record webhook success
+            $this->setModuleSetting('last_webhook_status', 'success');
+            $this->setModuleSetting('last_webhook_time', time());
+            $this->sendJson(200, ['status' => 200, 'message' => 'Success']);
             
         } catch(\Exception $e) {
             $this->log("eRecht24 webhook error: " . $e->getMessage());
-            http_response_code(500);
-            header('Content-Type: application/json');
-            echo json_encode(['error' => 'Internal server error']);
+            // record webhook failure
+            $this->setModuleSetting('last_webhook_status', 'error');
+            $this->setModuleSetting('last_webhook_time', time());
+            $this->sendJson(500, ['error' => 'Internal server error']);
         }
     }
 
@@ -181,33 +185,38 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
      */
     protected function validateWebhookRequest() {
         $input = $this->wire('input');
+        $cache = $this->wire('cache');
         
-        $secret = $input->get('erecht24_secret');
-        $type = $input->get('erecht24_type');
-        $timestamp = $input->get('erecht24_timestamp');
+        $type = (string) $input->get('erecht24_type');
+        $secret = (string) ($input->get('erecht24_secret') ?: $this->getServerHeader('HTTP_X_ERECHT24_SECRET'));
+        $timestamp = (string) ($input->get('erecht24_timestamp') ?: $this->getServerHeader('HTTP_X_ER24_TIMESTAMP'));
+        $nonce = (string) ($input->get('erecht24_nonce') ?: $this->getServerHeader('HTTP_X_ER24_NONCE'));
         
-        if(!$secret || !$type) {
+        if(!$type || !in_array($type, self::ALLOWED_PUSH_TYPES, true)) {
             return false;
         }
         
-        if(!in_array($type, self::ALLOWED_PUSH_TYPES)) {
-            return false;
-        }
-        
-        $webhookSecret = $this->getModuleSetting('webhook_secret');
+        $webhookSecret = (string) $this->getModuleSetting('webhook_secret');
         if(!$webhookSecret || $webhookSecret !== $secret) {
             return false;
         }
         
-        // Optional timestamp validation (prevent replay attacks)
-        if($timestamp) {
+        // For non-ping events, require timestamp + nonce with replay protection
+        if($type !== 'ping') {
+            if(!$timestamp || !$nonce) return false;
             $currentTime = time();
-            $requestTime = (int)$timestamp;
-            // Allow requests within 5 minutes
+            $requestTime = (int) $timestamp;
             if(abs($currentTime - $requestTime) > 300) {
-                $this->log("eRecht24 webhook timestamp validation failed: too old");
+                $this->log('eRecht24 webhook timestamp validation failed: outside tolerance');
                 return false;
             }
+            $nonceKey = 'erecht24_nonce_' . sha1($nonce);
+            if($cache->get($nonceKey)) {
+                $this->log('eRecht24 webhook replay detected for nonce');
+                return false;
+            }
+            // store nonce for 10 minutes
+            $cache->save($nonceKey, 1, 600);
         }
         
         return true;
@@ -217,8 +226,7 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
      * Handle ping request
      */
     protected function handlePing() {
-        header('Content-Type: application/json');
-        echo json_encode(['code' => 200, 'message' => 'pong']);
+        $this->sendJson(200, ['code' => 200, 'message' => 'pong']);
     }
 
     /**
@@ -250,8 +258,6 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
      * @return array|null Legal text data or null on error
      */
     protected function fetchLegalText($type, $apiKey) {
-        $http = new WireHttp();
-        
         $endpoint = '';
         switch($type) {
             case 'imprint':
@@ -267,29 +273,46 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
                 return null;
         }
         
-        $url = self::API_HOST . $endpoint;
+        $url = $this->getApiHost() . $endpoint;
+        $timeout = (int) $this->getHttpTimeout();
+        $retries = (int) $this->getHttpRetries();
+        $backoffMs = 300; // initial backoff
         
-        $http->setHeaders([
-            'eRecht24' => $apiKey,
-            'Content-Type' => 'application/json',
-            'Cache-Control' => 'no-cache'
-        ]);
-        
-        $response = $http->get($url);
-        
-        if($http->getHttpCode() !== 200) {
-            $this->log("eRecht24 API error: HTTP " . $http->getHttpCode());
+        for($attempt = 0; $attempt <= $retries; $attempt++) {
+            $http = new WireHttp();
+            if(method_exists($http, 'setTimeout')) {
+                $http->setTimeout($timeout);
+            }
+            $http->setHeaders([
+                'eRecht24' => $apiKey,
+                'Content-Type' => 'application/json',
+                'Cache-Control' => 'no-cache'
+            ]);
+            
+            $response = $http->get($url);
+            $code = (int) $http->getHttpCode();
+            
+            if($code === 200) {
+                $data = json_decode($response, true);
+                if(!$data || !isset($data['html_de'])) {
+                    $this->log('eRecht24 API error: Invalid response format');
+                    return null;
+                }
+                return $data;
+            }
+            
+            // Retry on 429 and 5xx
+            if($attempt < $retries && ($code === 429 || $code >= 500 || $code === 0)) {
+                usleep($backoffMs * 1000);
+                $backoffMs = min($backoffMs * 2, 4000);
+                continue;
+            }
+            
+            $this->log("eRecht24 API error: HTTP $code on $url");
             return null;
         }
         
-        $data = json_decode($response, true);
-        
-        if(!$data || !isset($data['html_de'])) {
-            $this->log("eRecht24 API error: Invalid response format");
-            return null;
-        }
-        
-        return $data;
+        return null;
     }
 
     /**
@@ -303,6 +326,7 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
     protected function createLegalTextPage($type, $legalText) {
         $pages = $this->wire('pages');
         $templates = $this->wire('templates');
+        $database = $this->wire('database');
         
         // Ensure legal-text template exists
         $template = $templates->get('legal-text');
@@ -317,52 +341,128 @@ class Erecht24 extends WireData implements Module, ConfigurableModule {
             $parentPage = $pages->get('/');
         }
         
-        // Create page name with date and type
         $date = date('Y-m-d H:i:s');
         $typeName = self::LEGAL_TEXT_TYPES[$type] ?? $type;
-        $pageName = $date . '-' . $this->sanitizer->pageName($typeName);
         
-        // Check if page already exists today
+        // Idempotency: compute content hash and skip if identical content already exists for this type
+        $contentHash = sha1($type . '|' . ($legalText['html_de'] ?? '') . '|' . ($legalText['html_en'] ?? ''));
+        $existing = $pages->find("parent=$parentPage, template=legal-text, legal_type=$type, include=unpublished, sort=-created, limit=20");
+        foreach($existing as $ex) {
+            $deSame = !$template->hasField('legal_content_de') || $ex->legal_content_de === ($legalText['html_de'] ?? '');
+            $enSame = !$template->hasField('legal_content_en') || $ex->legal_content_en === ($legalText['html_en'] ?? '');
+            if($deSame && $enSame) {
+                $this->log("Skipped creating duplicate legal text page (idempotent): {$ex->path}");
+                // update last sync timestamp
+                $this->setModuleSetting('last_sync_' . $type, time());
+                return $ex;
+            }
+        }
+        
+        // Page name with type and timestamp for uniqueness
+        $pageName = date('Y-m-d-His') . '-' . $this->sanitizer->pageName($typeName);
+        
+        // Create new or update existing with same name today if any
         $existingPage = $parentPage->child("name=$pageName");
+        $page = $existingPage && $existingPage->id ? $existingPage : new Page();
         
-        if($existingPage->id) {
-            // Update existing page
-            $page = $existingPage;
-        } else {
-            // Create new page
-            $page = new Page();
-            $page->template = $template;
-            $page->parent = $parentPage;
-            $page->name = $pageName;
-            $page->status(Page::statusUnpublished);
+        try {
+            $database->beginTransaction();
+            if(!$page->id) {
+                $page->template = $template;
+                $page->parent = $parentPage;
+                $page->name = $pageName;
+                $page->status(Page::statusUnpublished);
+            }
+            // Set page title
+            $page->title = $typeName . ' - ' . $date;
+            
+            // Set legal text content (assuming fields exist on template)
+            if($template->hasField('legal_content_de')) {
+                $page->legal_content_de = $legalText['html_de'];
+            }
+            if($template->hasField('legal_content_en') && isset($legalText['html_en'])) {
+                $page->legal_content_en = $legalText['html_en'];
+            }
+            if($template->hasField('legal_type')) {
+                $page->legal_type = $type;
+            }
+            if($template->hasField('legal_date')) {
+                $page->legal_date = $date;
+            }
+            // Save the page
+            $page->save();
+            $database->commit();
+        } catch(\Exception $e) {
+            if($database->inTransaction()) $database->rollBack();
+            throw $e;
         }
         
-        // Set page title
-        $page->title = $typeName . ' - ' . $date;
+        // update last sync timestamp
+        $this->setModuleSetting('last_sync_' . $type, time());
         
-        // Set legal text content (assuming fields exist on template)
-        if($template->hasField('legal_content_de')) {
-            $page->legal_content_de = $legalText['html_de'];
-        }
-        
-        if($template->hasField('legal_content_en') && isset($legalText['html_en'])) {
-            $page->legal_content_en = $legalText['html_en'];
-        }
-        
-        if($template->hasField('legal_type')) {
-            $page->legal_type = $type;
-        }
-        
-        if($template->hasField('legal_date')) {
-            $page->legal_date = $date;
-        }
-        
-        // Save the page
-        $page->save();
-        
-        $this->log("Created/updated legal text page: {$page->path}");
+        $this->log("Created/updated legal text page: {$page->path} (hash=$contentHash)");
         
         return $page;
+    }
+
+    /**
+     * Helper: unified JSON response output
+     */
+    protected function sendJson(int $statusCode, array $payload): void {
+        http_response_code($statusCode);
+        header('Content-Type: application/json');
+        echo json_encode($payload);
+    }
+
+    /**
+     * Helper: get request method uppercased
+     */
+    protected function getRequestMethod(): string {
+        return strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
+    }
+
+    /**
+     * Helper: safe server header fetch
+     */
+    protected function getServerHeader(string $key): ?string {
+        return isset($_SERVER[$key]) ? (string) $_SERVER[$key] : null;
+    }
+
+    /**
+     * Helper: API host with config override (e.g. $config->erecht24_api_host)
+     */
+    protected function getApiHost(): string {
+        $cfg = $this->wire('config');
+        $host = isset($cfg->erecht24_api_host) ? (string) $cfg->erecht24_api_host : '';
+        return $host ?: self::API_HOST;
+    }
+
+    /**
+     * Helper: HTTP timeout (seconds), override via $config->erecht24_http_timeout
+     */
+    protected function getHttpTimeout(): int {
+        $cfg = $this->wire('config');
+        return isset($cfg->erecht24_http_timeout) ? (int) $cfg->erecht24_http_timeout : 10;
+    }
+
+    /**
+     * Helper: HTTP retries, override via $config->erecht24_http_retries
+     */
+    protected function getHttpRetries(): int {
+        $cfg = $this->wire('config');
+        return isset($cfg->erecht24_http_retries) ? (int) $cfg->erecht24_http_retries : 2;
+    }
+
+    /**
+     * Public preview helper for admin dry-run: fetch legal text without saving
+     *
+     * @param string $type
+     * @return array|null
+     */
+    public function getLegalTextPreview(string $type) {
+        $apiKey = (string) $this->getModuleSetting('api_key');
+        if(!$apiKey) return null;
+        return $this->fetchLegalText($type, $apiKey);
     }
 
     /**
